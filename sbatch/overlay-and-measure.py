@@ -2,9 +2,15 @@ import sys
 import pickle
 import pathlib
 import tifffile
+import numpy as np
 import pandas as pd
 import scanpy as sc
 import anndata as ad
+from tqdm import tqdm
+
+from PIL import Image, ImageDraw
+from shapely.geometry import Polygon
+
 from src.image_alignment import *
 
 oil_red_o_image_mapping = {
@@ -22,12 +28,39 @@ oil_red_o_image_mapping = {
     "99-15": "0029282_AD_44_99-15_04-06.tif"
 }
 
-folder_key = sys.argv[1]
+folder_key = '18-20'
 
 raw_slide_location = pathlib.Path("/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet-pipeline/data/raw/slides/")
 segmentation_slide_location = pathlib.Path("/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet-pipeline/data/processed/segmentation")
 segmentation_alignments_location = pathlib.Path("/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet-pipeline/data/alignments")
 
+def polygons_to_instance_mask(polygons, image_size):
+    """
+    Convert a list of polygons to an instance segmentation mask.
+
+    Args:
+        polygons: List of polygons, each a list of (x, y) tuples.
+        image_size: (width, height) of the output mask.
+
+    Returns:
+        A numpy array of shape (height, width) with instance labels.
+    """
+    width, height = image_size
+    mask = Image.new("I", (width, height), 0)  # "I" = 32-bit signed integer pixels
+    draw = ImageDraw.Draw(mask)
+
+    for idx, poly_coords in tqdm(enumerate(polygons, start=1)):  # Start instance IDs from 1
+        # Draw polygon as filled shape
+        draw.polygon(poly_coords, fill=idx)
+
+    return np.array(mask)
+
+boundaries = pd.read_csv(list(pathlib.Path("/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet/data/raw/xenium_runs").glob(f"*{folder_key}*"))[0] / "cell_boundaries.csv.gz")
+
+polygons = [
+    [(x, y) for x, y in zip(df["vertex_x"]/.2125, df["vertex_y"]/.2125)]
+    for cell, df in boundaries.groupby("cell_id")
+]
 
 # NOTE: This originally was the code that was used, defines segmentation using random forest masking.
 # # plin_path = segmentation_slide_location / "plin2" / f"rf_mask_{folder_key}.pickle"
@@ -82,13 +115,16 @@ oil_red_o_image = apply_transformation_matrix(
 ) > 0
 tifffile.imwrite(f"/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet-pipeline/data/processed/warped_segmentation/oil_red_o/{folder_key}.tif", oil_red_o_image)
 
+instance_segmentation = polygons_to_instance_mask(polygons, oil_red_o_image.shape[::-1])
 
 # Convert to measurements
 print(f"Measurement of {folder_key} PLIN2")
-plin_measurements = generate_measurements(plin_image)
+plin_image = instance_segmentation * plin_image
+plin_measurements = generate_measurements((instance_segmentation * plin_image))
 plin_measurements.to_csv(f"/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet-pipeline/data/processed/locations/plin2/{folder_key}.csv")
 
 print(f"Measurement of {folder_key} Oil Red O")
+oil_red_o_image = instance_segmentation * oil_red_o_image
 oil_red_o_measurements = generate_measurements(oil_red_o_image)
 oil_red_o_measurements.to_csv(f"/oak/stanford/projects/kibr/Reorganizing/Projects/James/lipid-droplet-pipeline/data/processed/locations/oil-red-o/{folder_key}.csv")
 
